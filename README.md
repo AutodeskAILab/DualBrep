@@ -1,20 +1,40 @@
 # DualBrep — Reconstruction & Generation Inference
 
-Turn an unstructured mesh (or a point cloud / single image) into a watertight, parametric **B-rep**
-(STEP file).
+Official implementation of **DualBrep: A Dual-Field Continuous Representation for B-rep Modelling**
+(Yilin Liu, Pradeep Jayaraman, Chinthala Reddy, Xiang Xu, Hooman Shayani), to appear at
+**SIGGRAPH 2026** — [arXiv:2606.31579](https://arxiv.org/abs/2606.31579). If you use this code,
+please [cite it](#citation).
 
-This is the official implementation of our **SIGGRAPH 2026** paper,
-[arXiv:2606.31579](https://arxiv.org/abs/2606.31579). If you use this code, please [cite
-it](#citation).
+Boundary Representation (B-rep) is the dominant data format in Computer-Aided Design (CAD), prized
+for its analytical precision and native support for parametric editing. Its heterogeneous
+structure, however — continuous parametric geometry coupled with a discrete topological graph —
+makes it difficult for deep learning: methods that predict the B-rep graph directly rely on
+fixed-size padding or sequential tokenization, which scale poorly with the combinatorial
+complexity of CAD models and cannot be optimized end-to-end for geometry and watertightness.
+
+**DualBrep** sidesteps this by encoding a CAD model as two continuous scalar fields over a shared
+Euclidean domain: a **signed distance field (SDF)** capturing the global shape geometry, and an
+**unsigned distance field (UDF)** that encodes topology implicitly through a Voronoi partition of
+the surface. Compressing both fields into a single latent keeps the representation primitive-free —
+it adapts to arbitrary face counts and surface types — and lets a **flow-matching** model sample
+geometry and topology jointly from one code, avoiding the error accumulation that afflicts
+sequential B-rep predictors. A neural **rebuilder** then extracts an explicit, watertight B-rep,
+spanning both prismatic and free-form faces, directly from the continuous dual fields. The result
+is a robust backbone for CAD learning, with strong results on point-cloud reverse engineering and
+generative modelling.
+
+This repository provides the **inference** pipeline: it turns an unstructured mesh (or a point
+cloud / single RGB image) into a watertight, parametric **B-rep** (STEP file), covering both
+**reconstruction** (autoencoding) and **generation** (point-cloud- or image-conditioned flow).
 
 ## Release progress
 
 - [x] **Checkpoint release**
 - [x] **Sample code release**
-- [x] **Evaluation code** (`eval_seg.py`)
-- [ ] Full testing results
+- [x] **Evaluation code**
+- [x] **VAE pipeline**
+- [x] **Full testing results**
 - [ ] Training scripts & data pipeline
-- [ ] VAE pipeline
 
 # Install
 
@@ -298,13 +318,14 @@ Across rotations, roughly half seal into closed 1-solid STEPs (`BRepCheck` valid
 # Citation
 
 This repository is the official implementation of our SIGGRAPH 2026 paper
-([arXiv:2606.31579](https://arxiv.org/abs/2606.31579)). If you use this code, please cite:
+([arXiv:2606.31579](https://arxiv.org/abs/2606.31579)). If you use this code or the ideas in the
+paper, please cite:
 
 ```bibtex
-@article{dualbrep2026,
-  title         = {DualBrep: <paper title>},
-  author        = {<author list>},
-  journal       = {ACM Transactions on Graphics (Proc. SIGGRAPH)},
+@article{liu2026dualbrep,
+  title         = {DualBrep: A Dual-Field Continuous Representation for B-rep Modelling},
+  author        = {Yilin Liu and Pradeep Jayaraman and Chinthala Reddy and Xiang Xu and Hooman Shayani},
+  journal       = {Proc. SIGGRAPH},
   year          = {2026},
   eprint        = {2606.31579},
   archivePrefix = {arXiv},
