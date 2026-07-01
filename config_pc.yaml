@@ -13,6 +13,7 @@ dataset:
   clip_value: 0.015        # SDF/UDF truncation; decoded fields are rescaled by this
   num_points: 32768        # surface points sampled when the input is a mesh (ignored for point clouds)
   per_axis_norm: false     # true also stretches thin axes and denormalizes cluster.ply to input coords
+  id_aug: 3                # octahedral pose used to encode the cloud (3 = canonical, best); recon is rotated back to input coords
 
 # Model architecture.
 model:

@@ -3,8 +3,10 @@
 Given a result folder containing ``recon_sdf.ply`` (the reconstructed surface) and
 ``udf_g.npy`` (per-face unsigned distance to the nearest BRep edge), ``process_item``
 produces ``cluster.ply`` — the surface colored by face label. The default
-``hierarchical`` mode grows watershed regions from low-UDF seeds and merges small
-clusters. Operates on local folders; ``s3://`` folders are supported when
+``hierarchical`` mode is a two-pass threshold + connected-components region grow
+(reproducing the C++ ``segment_mode3`` baseline): pass 1 labels the connected
+components of the above-threshold faces, pass 2 re-splits clusters at a higher UDF
+threshold. Operates on local folders; ``s3://`` folders are supported when
 ``cloudpathlib`` is installed.
 """
 import shutil, copy
@@ -33,12 +35,17 @@ def download_file(remote_path, tmp_dir):
     return local
 
 
-# Each result folder is expected to contain "recon_sdf.ply" and "udf_g.npy".
+# Each result folder is expected to contain "recon_sdf.ply" and "udf_g.npy"
+# (or a dense "recon_udf.npy" UDF volume, sampled per-face to mirror the C++ tool).
+# Defaults below reproduce the C++ dualfield2mesh `segment_mode3` (the baseline that
+# produced the reference cluster.ply): single seed threshold 0.005, second-pass split
+# 0.01, min cluster size 10, and NO plane-based small-cluster merge / final cut.
 threshold = 0.01 # For coarse segmentation
-threshold1 = 0.003 # For hierarchical segmentation pass 1
-threshold2 = 0.007 # For hierarchical segmentation pass 2
+threshold1 = 0.005 # Pass-1 seed/mask threshold (C++ segment_mode3 --threshold)
+threshold2 = 0.01  # Pass-2 split threshold (C++ segment_mode3 hard-coded second_threshold)
+filter_size = 10   # Min cluster size (C++ segment_mode3 --filter_size)
 mode = "hierarchical"  # "coarse", "hierarchical", "udf_mesh", "advanced"
-is_merge_small = True  # Whether to merge small clusters in hierarchical segmentation
+is_merge_small = False # C++ segment_mode3 (fine_seg off) has no plane-merge / back-fill / final cut
 final_size_threshold = 15
 
 def segment_mesh_by_brep_edges(mesh, vertices_udf,
@@ -1119,17 +1126,41 @@ def colorize_mesh(mesh, labels, num_clusters):
     return mesh_colored
 
 
+def _perface_udf_from_volume(mesh, vol):
+    """Per-face UDF by trilinear-sampling a dense (R,R,R) UDF volume at triangle centroids.
+
+    Mirrors the C++ dualfield2mesh: centroid in [-1,1] -> voxel (c+1)/2*R, trilinear, abs.
+    Used when only a dense ``recon_udf.npy`` is available (no per-face ``udf_g.npy``).
+    """
+    from scipy.ndimage import map_coordinates
+    vol = np.asarray(vol, dtype=np.float64)
+    R = vol.shape[0]
+    verts = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.faces)
+    centroids = verts[faces].mean(axis=1)              # (F, 3), normalized [-1,1] frame
+    vox = np.clip((centroids + 1.0) * 0.5 * R, 0, R - 1)
+    udf = map_coordinates(vol, vox.T, order=1, mode="nearest")  # trilinear
+    return np.abs(udf).astype(np.float32)
+
+
 def process_item(folder, v_from_scratch=True):
     try:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_dir = Path(temp_dir)
+            # Per-face UDF source: udf_g.npy (direct per-face probe) or, failing that, a
+            # dense recon_udf.npy volume sampled per-face like the C++ dualfield2mesh.
             if isinstance(folder, S3Path):
-                download_file(folder/"udf_g.npy", temp_dir)
                 download_file(folder/"recon_sdf.ply", temp_dir)
+                for opt in ("udf_g.npy", "recon_udf.npy"):
+                    try:
+                        download_file(folder/opt, temp_dir)
+                    except Exception:
+                        pass
             else:
-                shutil.copy(folder/"udf_g.npy", temp_dir/"udf_g.npy")
                 shutil.copy(folder/"recon_sdf.ply", temp_dir/"recon_sdf.ply")
-                # shutil.copy(folder/"recon_udf.ply", temp_dir/"recon_udf.ply")
+                for opt in ("udf_g.npy", "recon_udf.npy"):
+                    if (folder/opt).exists():
+                        shutil.copy(folder/opt, temp_dir/opt)
 
             # Load per-axis normalization parameters if available
             norm_params = None
@@ -1152,12 +1183,19 @@ def process_item(folder, v_from_scratch=True):
                 directed=False)
             _face_mask = _comp == np.bincount(_comp).argmax()
             mesh = mesh.submesh([np.where(_face_mask)[0]], append=True)
-            face_udf = np.load(temp_dir / "udf_g.npy")[_face_mask]
+            if (temp_dir / "udf_g.npy").exists():
+                face_udf = np.load(temp_dir / "udf_g.npy")[_face_mask]
+            elif (temp_dir / "recon_udf.npy").exists():
+                # Sample the dense UDF volume at pruned-mesh face centroids (C++-faithful).
+                face_udf = _perface_udf_from_volume(mesh, np.load(temp_dir / "recon_udf.npy"))
+            else:
+                raise FileNotFoundError(f"{folder}: need udf_g.npy or recon_udf.npy")
 
             if mode == "coarse":
                 num_clusters, labels = coarse_segmentation(mesh, face_udf, threshold=threshold)
             elif mode == "hierarchical":
-                num_clusters, labels = hierarchical_segmentation(mesh, face_udf, threshold1=threshold1, threshold2=threshold2)
+                num_clusters, labels = hierarchical_segmentation(
+                    mesh, face_udf, threshold1=threshold1, threshold2=threshold2, filter_size=filter_size)
                 if is_merge_small:
                     num_clusters, labels = merge_small_plane_clusters(mesh, labels)
             elif mode == "udf_mesh":

@@ -8,6 +8,7 @@ data/
 *.ply
 *.npz
 
-# keep the bundled demo point clouds
+# keep the bundled demo inputs (point clouds + precomputed implicit samples)
 !sample/
 !sample/*.ply
+!sample/*.npz

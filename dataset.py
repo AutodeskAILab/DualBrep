@@ -22,7 +22,12 @@ from pathlib import Path
 
 import numpy as np
 import trimesh
+from scipy.spatial.transform import Rotation
 from torch.utils.data import Dataset
+
+# Octahedral group (24 proper rotations); index 3 is the identity / canonical pose.
+# Same set (and indexing) used by the model, rebuild.py and brep_post.
+_OCTA = Rotation.create_group("O").as_matrix().astype(np.float32)
 
 
 def _is_s3(path) -> bool:
@@ -170,6 +175,12 @@ class PointCloudDataset(Dataset):
         self.num_points = int(v_conf.get("num_points", 32768))
         self.per_axis_norm = bool(v_conf.get("per_axis_norm", False))
         self.ext = str(v_conf.get("ext", ".ply"))
+        # Octahedral pose applied to the (normalized) cloud before encoding. The encoder
+        # is not rotation-invariant, so a different pose gives a different reconstruction.
+        # 3 = identity (canonical); the reconstruction is rotated back to input coords
+        # after decoding, so cluster.ply and the final B-rep stay in the input frame.
+        self.id_aug = int(v_conf.get("id_aug", 3))
+        self.aug_R = _OCTA[self.id_aug]
 
         names = _resolve_names(self.data_root, v_conf.get("name_list"), self.ext)
         if v_conf.get("num_samples"):
@@ -234,12 +245,19 @@ class PointCloudDataset(Dataset):
                 normals = normals * norm_scale[None, :]
                 normals /= np.linalg.norm(normals, axis=1, keepdims=True).clip(min=1e-12)
 
+        # Rotate the cloud (points + normals) into octahedral pose `id_aug` before encoding.
+        # Rotation is orthogonal, so normals rotate the same way (no inverse-transpose).
+        if self.id_aug != 3:   # _OCTA[3] == identity; skip the no-op rotation
+            pts = pts @ self.aug_R.T
+            normals = normals @ self.aug_R.T
+
         surf = np.concatenate([pts, normals], axis=1).astype(np.float32)
         out = {
             "prefix": self.names[v_idx],
             "clip_value": self.clip_value,
             "is_aug": 0,
-            "id_aug": 3,   # octahedral identity (canonical pose)
+            "id_aug": self.id_aug,   # tags the recon folder <prefix>_<id_aug>
+            "aug_R": self.aug_R,     # so recon can be rotated back to input coords
             "sample_points_surfaces": surf,
             "pc": surf,
         }

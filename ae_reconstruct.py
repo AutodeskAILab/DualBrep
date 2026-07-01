@@ -110,20 +110,31 @@ class VAEInference(pl.LightningModule):
                 if f.shape[0] == 0:
                     print(f"[{prefix}] empty SDF mesh, skipping")
                     continue
-                sdf_mesh = trimesh.Trimesh(vertices=v, faces=f)
-                sdf_mesh.export(str(item_root / "recon_sdf.ply"))
-
                 vu, fu = udf2mesh(udf[i], self.udf_threshold)
-                if fu.shape[0] > 0:
-                    trimesh.Trimesh(vertices=vu, faces=fu).export(str(item_root / "recon_udf.ply"))
 
                 # Per-face SDF/UDF probed at the surface-mesh face centers (clustering input).
-                vv = np.asarray(sdf_mesh.vertices)
-                ff = np.asarray(sdf_mesh.faces)
-                centers = vv[ff].mean(axis=1)
+                # The latent lives in the (possibly rotated) encoding frame, so probe the
+                # centers there, before rotating the mesh back below.
+                centers = v[f].mean(axis=1)
                 face_res = _inference(latents[i:i + 1], model.query, self.test_res, centers)
                 sdf_g = np.clip(face_res[0, ..., 0].float().cpu().numpy(), -1, 1) * self.clip_value
                 udf_g = np.clip(face_res[0, ..., 1].float().cpu().numpy(), 0, 1) * self.clip_value
+
+                # If the point cloud was rotated before encoding (PointCloudDataset.id_aug),
+                # rotate the reconstruction back to input coordinates so cluster.ply, the
+                # meshes and everything downstream align with the original cloud. aug_R is
+                # orthogonal, so the inverse is applied as `v @ R` (undoing `pts @ R.T`).
+                if "aug_R" in batch:
+                    R = batch["aug_R"][i].float().cpu().numpy()
+                    v = v @ R
+                    if fu.shape[0] > 0:
+                        vu = vu @ R
+
+                sdf_mesh = trimesh.Trimesh(vertices=v, faces=f)
+                sdf_mesh.export(str(item_root / "recon_sdf.ply"))
+                if fu.shape[0] > 0:
+                    trimesh.Trimesh(vertices=vu, faces=fu).export(str(item_root / "recon_udf.ply"))
+
                 np.save(str(item_root / "sdf_g"), sdf_g)
                 np.save(str(item_root / "udf_g"), udf_g)
 

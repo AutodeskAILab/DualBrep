@@ -3,10 +3,15 @@
 Turn an unstructured mesh (or a point cloud / single image) into a watertight, parametric **B-rep**
 (STEP file).
 
+This is the official implementation of our **SIGGRAPH 2026** paper,
+[arXiv:2606.31579](https://arxiv.org/abs/2606.31579). If you use this code, please [cite
+it](#citation).
+
 ## Release progress
 
 - [x] **Checkpoint release**
 - [x] **Sample code release**
+- [x] **Evaluation code** (`eval_seg.py`)
 - [ ] Full testing results
 - [ ] Training scripts & data pipeline
 - [ ] VAE pipeline
@@ -37,7 +42,7 @@ unzip checkpoints.zip      # -> checkpoints/
 DualBrep/
 ├── sample/        00013293.ply  00021127.ply  00026543.ply  00030157.ply   # bundled demo clouds
 ├── checkpoints/   ae_vae.ckpt  pc_vae.ckpt  pc_flow.ckpt  img_flow.ckpt  parametrizer.ckpt
-└── data/          implicit/  pc/  imgs/  final_test.txt        # full 4150-shape test set
+└── data/          implicit/  pc/  imgs/  gt_seg/  final_test.txt   # full 4150-shape test set
 ```
 
 # Introduction of the pipeline
@@ -45,7 +50,7 @@ DualBrep/
 ```
 Input mesh / point cloud / image
    └─ AE  or  diffusion + VAE decoder      (ae_reconstruct.py / vae_generate.py)
-        └─ SDF / UDF fields  →  surface mesh + Voronoi field
+        └─ SDF / UDF fields  →  surface mesh (recon_sdf.ply) + edge/wireframe (recon_udf.ply)
              └─ segmentation                (clustering.py)        →  segmented mesh (cluster.ply)
                   └─ Parametrizer            (rebuild.py)           →  per-face UV grids + edges + connectivity (tmp/<name>_<k>/post.npz)
                        └─ Rebuilder          (postprocess.py)       →  watertight B-rep (<name>.step + <name>.ply)
@@ -53,21 +58,31 @@ Input mesh / point cloud / image
 
 | Stage | Script | Output |
 |-------|--------|--------|
-| AE reconstruction (SDF/UDF) | `ae_reconstruct.py` | `recon_sdf.ply`, `recon_udf.ply`, `udf_g.npy` |
+| AE reconstruction (SDF/UDF) | `ae_reconstruct.py` | `recon_sdf.ply`, `recon_udf.ply`, `sdf_g.npy`/`udf_g.npy`, `norm_params.npz` (PC path) |
 | Diffusion generation (PC / image → SDF/UDF) | `vae_generate.py` | same, conditioned |
 | Segmentation (B-rep faces) | `clustering.py` (via the above) | `cluster.ply` |
-| Parametrizer (UV grids + topology) | `rebuild.py` (+`rebuild_model.py`) | `tmp/<name>_<k>/post.npz` |
+| Parametrizer (UV grids + topology) | `rebuild.py` (+`rebuild_model.py`) | `tmp/<id>_<k>/post.npz` |
 | Rebuilder (assemble solid) | `postprocess.py` (+`brep_post/`) | `<name>.step` + `<name>.ply` |
 
 # Quick start on sample data
 
-`run_pipeline.sh` runs the whole chain (point cloud → AE reconstruct → segment → parametrize →
-rebuild) on the **bundled `sample/` point clouds** — 4 shapes that reconstruct into valid
-solids. It needs only `checkpoints/` (no `data/` download required):
+`run_pipeline.sh` runs the whole chain on the **bundled `sample/` point clouds** — 4 shapes that
+reconstruct into valid solids, needing only `checkpoints/` (no `data/` download required).
+
+The quick start uses the **point-cloud autoencoder** (`DualVAE_PC`, `pc_vae.ckpt`) to perform
+**direct shape reconstruction and segmentation** — it encodes each input point cloud and decodes
+the SDF/UDF fields (a single encode→decode pass, **no diffusion / generation**), meshes the
+surface, and segments it into B-rep faces. The segmented mesh is then parametrized and rebuilt
+into a watertight solid:
+
+```
+point cloud ──(AE encode→decode)──▶ SDF/UDF ──▶ surface mesh + segmentation (cluster.ply)
+            └──▶ parametrize (per-face UV grids + edges) ──▶ rebuild ──▶ watertight B-rep (STEP)
+```
 
 ```bash
 ./run_pipeline.sh
-# overridable: CONFIG=config.yaml (implicit AE)  OUT=out  ROTATIONS=all  TEST_RES=256
+# overridable: CONFIG=config.yaml (implicit AE, from precomputed .npz)  OUT=out  ROTATIONS=all  TEST_RES=256
 ```
 
 Results land in `output_pipeline/` — `recon/<name>/cluster.ply` and one valid B-rep per shape
@@ -75,16 +90,22 @@ Results land in `output_pipeline/` — `recon/<name>/cluster.ply` and one valid 
 
 # Reproduce main results
 
-Run the stages explicitly on the full test set (4150 shapes, listed in `data/final_test.txt`).
-The configs default to the 8-shape demo list (`sample_shapes*.txt`); add
-`dataset.name_list=data/final_test.txt` to run the whole test set.
+Run the **same point-cloud autoencoder pipeline as the quick start**, but on the full test set
+(4150 shapes, listed in `data/final_test.txt`) instead of the bundled samples. First download the
+test-set archive from HuggingFace and unzip it into `data/` — it contains the input point clouds,
+the shape list, and the ground-truth segmentation used by [Evaluation](#evaluation):
 
 ```bash
-# 1) reconstruct (AE) OR generate (diffusion), with segmentation, at 256^3
-python ae_reconstruct.py config=config.yaml dataset.name_list=data/final_test.txt runtime.test_res=256   # implicit AE
-python ae_reconstruct.py config=config_pc.yaml runtime.test_res=256       # point-cloud AE
-python vae_generate.py   config=config_gen_pc.yaml                         # point cloud → shape
-python vae_generate.py   config=config_gen_img.yaml                        # image → shape
+hf download ADSKAILab/DualBrep test_data.zip --repo-type model --local-dir .
+unzip test_data.zip      # -> data/  (pc/  gt_seg/  final_test.txt  ...)
+```
+
+Then run the pipeline:
+
+```bash
+# 1) point-cloud AE (DualVAE_PC / pc_vae.ckpt): direct reconstruct SDF/UDF + segment, at 256^3
+python ae_reconstruct.py config=config_pc.yaml \
+    dataset.data_root=data/pc dataset.name_list=data/final_test.txt runtime.test_res=256
 #   -> per shape: recon_sdf.ply / recon_udf.ply / udf_g.npy / cluster.ply
 
 # 2) parametrize each segmented mesh (24-rotation test-time augmentation)
@@ -94,35 +115,100 @@ python rebuild.py --input <recon_output_dir> --out output_brep --rotations all
 python postprocess.py --input output_brep
 ```
 
+# Evaluation
+
+`eval_seg.py` scores a reconstructed B-rep against the ground-truth B-rep segmentation of the
+ABC test set.
+
+- **Input:** `--pred` a directory of your pipeline's predicted B-reps (STEP files), `--gt` the
+  ground-truth segmentation directory, and `--list` the shape names to score.
+- **Output:** a per-element accuracy report, printed and cached per shape under `--out`.
+
+Each predicted solid is decomposed with OpenCASCADE into faces / edges / vertices and their
+topology, then compared to the ground truth. It reports, per structural element
+(**surface / edge / vertex**): **F1 / precision / recall** — Hungarian matching of per-element
+point groups, a pair counting as matched when its symmetric point-to-point distance is below
+`0.1` (shapes are in the unit box) — plus the **chamfer distance**; and for topology,
+**face-edge** and **edge-vertex** adjacency F1 / precision / recall.
+
+The ground truth lives in `data/gt_seg/` — one `<name>.ply`, `<name>_edge.ply`,
+`<name>_vertex.ply`, `<name>_adj.npz` per shape. It ships in the **same data archive** as the
+`data/pc/` point clouds and `data/final_test.txt` from [Reproduce main
+results](#reproduce-main-results), so if you ran that step it is already in place.
+
+```bash
+# score your pipeline output (flat brep/<name>.step layout) against the ground truth
+python eval_seg.py --pred output_pipeline/brep --gt data/gt_seg \
+    --list data/final_test.txt --out eval_out
+
+# quick test on just the first 100 shapes
+python eval_seg.py --pred output_pipeline/brep --gt data/gt_seg \
+    --list data/final_test.txt --limit 100 --out eval_out
+```
+
+The predicted STEP is looked up per shape at the first of `<pred>/<name>/pp/recon_brep.step`,
+`<pred>/<name>/recon_brep.step`, `<pred>/<name>.step`, `<pred>/brep/<name>.step`. Shapes with no
+sealed STEP score zero and are counted in the reported failure rate. Evaluation is Ray-parallel
+(`--num-cpus`, or `--serial` to debug); per-shape results are cached to `--out` as
+`<name>_eval.npz`, and `--report-only` re-aggregates them without recomputing.
+
 # Detailed use case
 
 ## VAE: encoding a B-rep into a continuous vecset latent and decode it back
 
-`ae_reconstruct.py` runs the dual-field autoencoder: it encodes sampled
-surface/edge/voronoi points into a vecset latent and decodes an **SDF** (watertight surface)
-+ **UDF**-to-edges field, then segments the surface. Two input modes (`dataset.input`):
+The input is a **B-rep (STEP file)**. `ae_reconstruct.py` (the dual-field autoencoder `DualVAE`,
+checkpoint `ae_vae.ckpt`) encodes sample points taken on the solid's **surface**, **edges**, and
+**Voronoi diagram** into a vecset latent, then decodes an **SDF** (watertight surface) + a **UDF**
+field (unsigned distance to the **Voronoi diagram** that separates adjacent faces) and segments
+the surface into B-rep faces. The sample points come from a precomputed `.npz` — you can either
+use the **bundled examples** (A) or **compute them from your own STEP** (B).
 
-| Mode | Input | Model | Config | Checkpoint |
-|------|-------|-------|--------|------------|
-| `implicit` | precomputed `.npz` (surface+edge+voronoi+queries) | `DualVAE` | `config.yaml` | `ae_vae.ckpt` |
-| `pointcloud` | oriented `.ply` / `.obj` | `DualVAE_PC` | `config_pc.yaml` | `pc_vae.ckpt` |
+### A) Bundled examples (quick start)
+
+Four precomputed `.npz` (`00013293`, `00021127`, `00026543`, `00030157` — the same shapes as the
+demo point clouds) are packaged as `implicit_test.zip` on HuggingFace. Download and unzip them
+into `sample/` (they are too large to ship in the repo):
 
 ```bash
-python ae_reconstruct.py                              # implicit defaults (sample_shapes.txt)
-python ae_reconstruct.py config=config_pc.yaml        # point-cloud defaults (sample_shapes_pc.txt)
-python ae_reconstruct.py checkpoint=checkpoints/ae_vae.ckpt dataset.data_root=/dir \
-    dataset.name_list=null runtime.output_dir=output runtime.test_res=256
+hf download ADSKAILab/DualBrep implicit_test.zip --repo-type model --local-dir .
+unzip implicit_test.zip -d sample/      # -> sample/00013293.npz  00021127.npz  ...
+python ae_reconstruct.py                # implicit defaults: data_root=sample, sample_shapes.txt, ae_vae.ckpt
 ```
 
-Outputs per shape (`runtime.output_dir/<prefix>_<id_aug>/`): `recon_sdf.ply`, `recon_udf.ply`,
-`sdf_g.npy`/`udf_g.npy`, `cluster.ply`. Key knobs: `runtime.test_res` (128/256/512),
-`runtime.acc=true` (accelerated near-surface mesher — coarse 128³ then re-evaluate the
-`|sdf|` band, identical iso-0 surface, ≈19× faster at 512³), `runtime.precision`.
+### B) From your own STEP (compute the samples)
 
-**Using your own STEP/B-rep.** The `implicit` `.npz` (surface/edge/**voronoi** samples +
-SDF/UDF queries) is precomputed from a B-rep. To build it for your own steps, compute the
-voronoi/implicit fields with the C++ tool and the prep script: `C/dualfield2mesh`
-(build via `C/install.sh`) and `python/data_mesh2sdfs/prepare_implicit_ray.py`.
+Derive the `.npz` from any STEP solid in three steps — compute the Voronoi field (C++), collect
+the samples (Python), then encode/decode. Point the commands below at your own STEP file (the
+examples use `00000164.step`).
+
+**1) Voronoi field (C++, `Voronoi/`).** `calculate_voronoi` reads a STEP, normalizes it into the
+`[-0.9, 0.9]` box, and writes the Voronoi mesh `voronoi.ply` (plus `normalized_mesh.ply` and
+`sampled_points.ply`). Build it once (needs vcpkg — CGAL / OpenCASCADE / Geogram / glog):
+
+```bash
+cd Voronoi
+./install.sh                     # apt deps + clones GTE/vcglib + vcpkg installs the C++ libs
+cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=external/vcpkg/scripts/buildsystems/vcpkg.cmake
+cmake --build build --config Release -j
+cd ..
+Voronoi/build/calculate_voronoi/calculate_voronoi 00000164.step out/00000164/
+```
+
+**2) Collect implicit samples (`prepare_implicit.py`).** Turns the STEP + `voronoi.ply` into the
+`.npz` the VAE consumes (surface/edge/voronoi point clouds + SDF/UDF query fields):
+
+```bash
+python prepare_implicit.py --step 00000164.step --voronoi out/00000164/voronoi.ply \
+    --out implicit/00000164.npz
+# batch:  python prepare_implicit.py --step-dir steps/ --voronoi-dir voronoi/ --out-dir implicit/
+```
+
+**3) Encode → latent → decode (`ae_reconstruct.py`).** Point the AE at your `.npz` folder:
+
+```bash
+python ae_reconstruct.py dataset.data_root=implicit dataset.name_list=null \
+    runtime.output_dir=output runtime.test_res=256
+```
 
 ## Shape generation: point-cloud- or image-conditioned
 
@@ -131,7 +217,7 @@ frozen `DualVAE` decode → SDF/UDF → mesh → segment):
 
 | Mode | Input | Encoder | Config | Checkpoint |
 |------|-------|---------|--------|------------|
-| `pointcloud` | `.ply` (8192 pts) | `PCModel2` | `config_gen_pc.yaml` | `pc_flow.ckpt` |
+| `pointcloud` | `.ply` (oriented; all verts used) | `PCModel2` | `config_gen_pc.yaml` | `pc_flow.ckpt` |
 | `image` | one RGB render | DINOv2 (`ImgModel`) | `config_gen_img.yaml` | `img_flow.ckpt` |
 
 ```bash
@@ -139,18 +225,43 @@ python vae_generate.py config=config_gen_pc.yaml         # point cloud → shape
 python vae_generate.py config=config_gen_img.yaml        # image → shape (downloads DINOv2 ~1.1 GB)
 ```
 
-Knobs: `runtime.steps` (Euler steps), `runtime.temperature` (`>0` enables classifier-free
-guidance), `runtime.test_res`.
+Each run writes `recon_sdf.ply` / `recon_udf.ply` / `cluster.ply` per shape, the same layout the
+autoencoder produces — so a generated shape feeds the identical `rebuild.py` → `postprocess.py`
+pipeline to become a watertight B-rep.
+
+Generation is **stochastic**: each run samples a fresh latent from noise, so (unlike the
+autoencoder) a single pass is not guaranteed to seal. Draw several samples per condition, run
+each through the parametrizer + rebuilder (`rebuild.py --rotations all`, 24-rotation
+test-time augmentation) and `postprocess.py`, then keep the samples that assemble into a valid
+solid:
+
+```bash
+# draw N stochastic samples per condition (each run re-samples from noise), and
+# parametrize (24 rotations) + assemble each; keep whichever samples seal
+for i in $(seq 0 7); do
+  python vae_generate.py config=config_gen_pc.yaml \
+      dataset.data_root=my_inputs dataset.name_list=my_list.txt \
+      runtime.output_dir=gen_out/s$i
+  python rebuild.py     --input gen_out/s$i --out gen_brep/s$i --rotations all
+  python postprocess.py --input gen_brep/s$i
+done
+# gen_brep/s<i>/<name>.step is sample i's B-rep (if it sealed); pick a valid one per shape
+```
 
 ## Mesh segmentation: segment an input mesh into B-rep faces
 
 `clustering.py` (invoked automatically when `runtime.compute_clustering=true`) segments the
-reconstructed surface using the UDF edge field. The segmentation is aligned with **B-rep
-faces** (one cluster per smooth face bounded by sharp edges), *not* semantic parts. It writes
-`cluster.ply` (per-face `label`), and can also be re-run on existing folders:
+reconstructed surface using the per-face UDF (unsigned distance to the nearest B-rep edge,
+stored in `udf_g.npy`). The default `hierarchical` mode is a two-pass threshold +
+connected-components region grow (reproducing the C++ `segment_mode3` baseline): pass 1 keeps
+faces whose UDF is above a threshold and labels their connected components (low-UDF faces near
+edges are left unlabelled as boundaries), then drops clusters smaller than `filter_size`; pass 2
+re-splits any cluster whose faces exceed a second, higher UDF threshold. The result is aligned
+with **B-rep faces** (one cluster per smooth face bounded by sharp edges), *not* semantic parts.
+It writes `cluster.ply` (per-face `label`), and can be re-run on existing folders:
 
 ```bash
-python clustering.py output/      # each folder needs recon_sdf.ply + udf_g.npy
+python clustering.py output/      # each folder needs recon_sdf.ply + (udf_g.npy OR a dense recon_udf.npy)
 ```
 
 ## Parametrization: segmented triangle soup → UV grids → trimmed, assembled B-rep
@@ -161,7 +272,10 @@ Two steps turn the segmented mesh into a valid solid.
 face (100 pts + normals), re-fits it as a 16×16 parametric surface grid, and predicts the
 face-face **intersection edges + topology**, written to `post.npz`. `--rotations all`
 re-poses the mesh by each of the 24 octahedral rotations `M[k]` (index 3 = identity) into
-`tmp/<name>_<k>/` — test-time augmentation: many more candidates seal than a single pose.
+`tmp/<id>_<k>/` — where `<id>` is the shape id (the recon folder name up to its first `_`, so
+recon dir `00013293_3` yields `tmp/00013293_00/ … tmp/00013293_23/`) and `<k>` is the rotation
+`postprocess.py` reads back to undo the pose. Test-time augmentation: many more candidates seal
+than a single pose.
 
 ```bash
 python rebuild.py --input <recon_dir>          --out output_brep --rotations all
@@ -180,3 +294,21 @@ python postprocess.py --input output_brep          # Ray parallel by default
 ```
 
 Across rotations, roughly half seal into closed 1-solid STEPs (`BRepCheck` valid); one is kept per shape.
+
+# Citation
+
+This repository is the official implementation of our SIGGRAPH 2026 paper
+([arXiv:2606.31579](https://arxiv.org/abs/2606.31579)). If you use this code, please cite:
+
+```bibtex
+@article{dualbrep2026,
+  title         = {DualBrep: <paper title>},
+  author        = {<author list>},
+  journal       = {ACM Transactions on Graphics (Proc. SIGGRAPH)},
+  year          = {2026},
+  eprint        = {2606.31579},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.GR},
+  url           = {https://arxiv.org/abs/2606.31579}
+}
+```

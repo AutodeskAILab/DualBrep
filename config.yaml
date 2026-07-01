@@ -8,7 +8,7 @@ checkpoint: checkpoints/ae_vae.ckpt
 dataset:
   input: implicit          # "implicit" (.npz geometry) or "pointcloud" (.ply/.obj); see config_pc.yaml
   # Directory of per-shape .npz files. Local path or s3:// prefix.
-  data_root: data/implicit
+  data_root: sample        # bundled precomputed samples; full test set: data_root=data/implicit name_list=data/final_test.txt
   # Optional text file of shape stems (one per line). null -> use every *.npz under data_root.
   name_list: sample_shapes.txt
   clip_value: 0.015        # SDF/UDF truncation; decoded fields are rescaled by this
