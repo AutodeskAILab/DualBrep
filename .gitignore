@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+output/
+output*/
+checkpoints/
+data/
+*.ckpt
+*.ply
+*.npz
+
+# keep the bundled demo point clouds
+!sample/
+!sample/*.ply

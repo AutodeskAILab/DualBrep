@@ -1,0 +1,41 @@
+# DualBrep VAE reconstruction from a raw POINT CLOUD.
+# Run with:  python ae_reconstruct.py config=config_pc.yaml
+# Overrides:  python ae_reconstruct.py config=config_pc.yaml dataset.data_root=/my/ply runtime.test_res=512
+
+# Point-cloud checkpoint (DualVAE_PC). Local path or s3:// URI (auto-downloaded).
+checkpoint: checkpoints/pc_vae.ckpt
+
+dataset:
+  input: pointcloud        # raw point clouds / meshes (.ply with vertex normals, or .obj)
+  data_root: sample        # bundled demo clouds; full test set: data_root=data/pc name_list=data/final_test.txt
+  name_list: sample_shapes_pc.txt   # null -> use every *.ply under data_root
+  ext: .ply                # file extension to load
+  clip_value: 0.015        # SDF/UDF truncation; decoded fields are rescaled by this
+  num_points: 32768        # surface points sampled when the input is a mesh (ignored for point clouds)
+  per_axis_norm: false     # true also stretches thin axes and denormalizes cluster.ply to input coords
+
+# Model architecture.
+model:
+  name: DualVAE_PC
+  tokens: [128.0, 256.0, 384.0, 512.0, 640.0, 1024.0, 2048.0]
+  train_prob: [0.1, 0.1, 0.1, 0.1, 0.1, 0.3, 0.2]
+  test_prob: 4096          # latent tokens sampled (via FPS) from the input point cloud
+  is_deterministic: true
+  is_fps: true
+  include_pi: false
+  is_gaussian_embedding: 1 # 1 = Fourier embedder (required by this checkpoint)
+  is_noisy: false
+  mask_voronoi_prob: 0.5   # training value; unused at inference in point-cloud mode
+  kl_weights: 0
+
+runtime:
+  gpu: 1
+  batch_size: 1
+  num_workers: 0
+  precision: "32-true"
+  output_dir: output_pc
+  test_res: 256            # marching-cubes grid resolution (128, 256 or 512)
+  acc: true                # accelerated near-surface multi-resolution mesher
+  udf_threshold: 0.01      # iso level (metric units) for the UDF edge mesh
+  compute_clustering: true # segment the surface into BRep faces -> cluster.ply
+  num_samples: null        # cap the number of shapes processed (null = all)

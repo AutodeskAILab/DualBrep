@@ -1,0 +1,50 @@
+# DualBrep — point-cloud-conditioned shape GENERATION (rectified flow).
+# Run with:  python vae_generate.py config=config_gen_pc.yaml
+# A frozen DualVAE (model.vae_weights) decodes the latent the flow samples.
+
+# Flow checkpoint (FusedModelFlow). Local path or s3:// URI (auto-downloaded).
+checkpoint: checkpoints/pc_flow.ckpt
+
+dataset:
+  input: pointcloud        # conditioning point clouds (.ply with vertex normals, or .obj)
+  data_root: data/pc
+  name_list: sample_shapes_pc.txt   # null -> every *.ply under data_root
+  ext: .ply
+  clip_value: 0.015        # decoded SDF/UDF are rescaled by this
+  num_points: 32768        # surface points sampled if the input is a mesh (point clouds use all verts)
+  per_axis_norm: false
+
+# Generation model (point-cloud-conditioned flow).
+model:
+  name: FusedModelFlow
+  vae_name: DualVAE
+  # Frozen VAE used to train the flow (decodes the sampled latent). Local path or s3:// URI.
+  vae_weights: checkpoints/ae_vae.ckpt
+  depth: 16                # PlainDiT depth
+  head: 16                 # PlainDiT heads
+  pc_model_name: PCModel2  # Gaussian-embedder point-cloud conditioner
+  global_scale: 2.0        # latent <-> flow-space scale
+  test_prob: 2048          # VAE token count knob; latent = 2*test_prob = 4096 tokens
+  is_fps: false
+  is_deterministic: true
+  is_gaussian_embedding: 1
+  is_noisy: false
+  include_pi: false
+  mask_voronoi_prob: 0
+  kl_weights: 1e-3
+  tokens: [128.0, 256.0, 384.0, 512.0, 640.0, 1024.0, 2048.0]
+  train_prob: [0.1, 0.1, 0.1, 0.1, 0.1, 0.3, 0.2]
+
+runtime:
+  gpu: 1
+  batch_size: 1
+  num_workers: 0
+  precision: "32-true"
+  output_dir: output_gen_pc
+  steps: 50                # flow ODE Euler steps
+  temperature: -1          # <=0 disables classifier-free guidance
+  test_res: 256            # marching-cubes grid resolution (128, 256 or 512)
+  acc: true                # accelerated near-surface multi-resolution mesher
+  udf_threshold: 0.01
+  compute_clustering: true
+  num_samples: null        # cap the number of shapes generated

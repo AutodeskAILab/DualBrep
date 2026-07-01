@@ -1,0 +1,19 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+-f https://data.pyg.org/whl/torch-2.7.1+cu128.html
+torch==2.7.1+cu128
+torchvision==0.22.1+cu128
+lightning==2.5.1
+numpy==2.1.2
+scipy==1.16.2
+omegaconf==2.3.0
+trimesh==4.11.0
+networkx==3.3
+PyMCubes==0.1.6
+torch_cluster==1.6.3+pt27cu128
+cloudpathlib[s3]==0.21.1
+tqdm==4.67.1
+timm==1.0.22
+x-transformers==2.14.2
+einops==0.8.1
+open3d==0.19.0
+ray==2.51.1
