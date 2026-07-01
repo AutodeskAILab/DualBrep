@@ -1,7 +1,7 @@
 # DualBrep — Reconstruction & Generation Inference
 
-Turn a CAD solid (or a point cloud / single image) into a watertight, parametric **B-rep**
-(STEP file). The neural stages run in PyTorch; the final B-rep assembly uses OpenCASCADE.
+Turn an unstructured mesh (or a point cloud / single image) into a watertight, parametric **B-rep**
+(STEP file).
 
 ## Release progress
 
