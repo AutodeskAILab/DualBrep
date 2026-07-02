@@ -3,8 +3,10 @@ __pycache__/
 *.log
 output/
 output*/
-checkpoints/
-data/
+# checkpoints/ and data/ are local symlinks to machine-specific mounts (contents come from
+# HuggingFace); anchor without a trailing slash so the symlinks themselves are ignored too.
+/checkpoints
+/data
 *.ckpt
 *.ply
 *.npz
