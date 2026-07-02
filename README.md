@@ -60,9 +60,10 @@ unzip checkpoints.zip      # -> checkpoints/
 
 ```
 DualBrep/
-├── sample/        00013293.ply  00021127.ply  00026543.ply  00030157.ply   # bundled demo clouds
+├── sample/        00013293.ply  00021127.ply  00026543.ply  00030157.ply   # bundled demo point clouds
+├── sample_imgs/   00013293.png  00021127.png  00026543.png  00030157.png   # bundled demo conditioning images
 ├── checkpoints/   ae_vae.ckpt  pc_vae.ckpt  pc_flow.ckpt  img_flow.ckpt  parametrizer.ckpt
-└── data/          implicit/  pc/  imgs/  gt_seg/  final_test.txt   # full 4150-shape test set
+└── data/          pc/  imgs/  gt_seg/  final_test.txt   # full 4150-shape test set
 ```
 
 # Introduction of the pipeline
@@ -241,8 +242,10 @@ frozen `DualVAE` decode → SDF/UDF → mesh → segment):
 | `image` | one RGB render | DINOv2 (`ImgModel`) | `config_gen_img.yaml` | `img_flow.ckpt` |
 
 ```bash
-python vae_generate.py config=config_gen_pc.yaml         # point cloud → shape
-python vae_generate.py config=config_gen_img.yaml        # image → shape (downloads DINOv2 ~1.1 GB)
+# point cloud → shape (bundled sample/ clouds)
+python vae_generate.py config=config_gen_pc.yaml  dataset.data_root=sample      dataset.name_list=null
+# single image → shape (bundled sample_imgs/; downloads DINOv2 ~1.1 GB on first run)
+python vae_generate.py config=config_gen_img.yaml dataset.data_root=sample_imgs dataset.name_list=null
 ```
 
 Each run writes `recon_sdf.ply` / `recon_udf.ply` / `cluster.ply` per shape, the same layout the
@@ -260,15 +263,22 @@ solid:
 # parametrize (24 rotations) + assemble each; keep whichever samples seal
 for i in $(seq 0 7); do
   python vae_generate.py config=config_gen_pc.yaml \
-      dataset.data_root=my_inputs dataset.name_list=my_list.txt \
-      runtime.output_dir=gen_out/s$i
+      dataset.data_root=sample dataset.name_list=null runtime.output_dir=gen_out/s$i
   python rebuild.py     --input gen_out/s$i --out gen_brep/s$i --rotations all
   python postprocess.py --input gen_brep/s$i
 done
 # gen_brep/s<i>/<name>.step is sample i's B-rep (if it sealed); pick a valid one per shape
 ```
 
-## Mesh segmentation: segment an input mesh into B-rep faces
+Not every sample seals. On the four bundled demo shapes, drawing 8 samples × 24 rotations each,
+**point-cloud** conditioning sealed a valid `BRepCheck` solid for **all four** shapes, while
+**single-image** conditioning sealed the simpler flange / grommet shapes but not the most detailed
+parts — image conditioning tends to over-segment complex geometry (many small B-rep faces), which
+seldom sews watertight. Point-cloud conditioning, which sees full 3D geometry, is more
+reliable. Keep any sample whose B-rep passes `BRepCheck`; if a detailed shape never seals, draw
+more samples.
+
+## Mesh segmentation: segment an input mesh with a Voronoi into B-rep faces
 
 `clustering.py` (invoked automatically when `runtime.compute_clustering=true`) segments the
 reconstructed surface using the per-face UDF (unsigned distance to the nearest B-rep edge,
@@ -304,7 +314,10 @@ python rebuild.py --input <name>/cluster.ply   --out output_brep --rotations all
 
 **Rebuilder — `postprocess.py`** (OpenCASCADE). Fits a trimmed B-spline surface per face,
 sews edges into wires/faces, and sews the faces into a **watertight solid**; it undoes each
-candidate's rotation with `inv(M[k])`. Candidates are assembled in parallel with **Ray** (one
+candidate's rotation with `inv(M[k])`. Each face boundary is first closed with a tolerance-based
+wire builder; if that leaves an open loop (common on large faces bordered by many edges, where no
+single tolerance both bridges the widest junction gap and avoids over-merging nearby vertices), a
+fallback re-assembles the loops by ordered endpoint chaining and welds the gaps. Candidates are assembled in parallel with **Ray** (one
 CPU each); for every shape the first rotation that seals is promoted to `<name>.step` +
 `<name>.ply` (triangulation) in the output folder — the 24 candidates stay under `tmp/`.
 

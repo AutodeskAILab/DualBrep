@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+*.log
 output/
 output*/
 checkpoints/
@@ -7,8 +8,12 @@ data/
 *.ckpt
 *.ply
 *.npz
+*.zip
 
-# keep the bundled demo inputs (point clouds + precomputed implicit samples)
+# Keep only the small bundled demo inputs in git: point clouds (sample/*.ply) and one
+# conditioning image per shape (sample_imgs/*.png). The large precomputed implicit samples
+# ship via HuggingFace (implicit_test.zip), not git.
 !sample/
 !sample/*.ply
-!sample/*.npz
+!sample_imgs/
+!sample_imgs/*.png
