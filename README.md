@@ -43,7 +43,7 @@ A single conda environment:
 ```bash
 conda create -n Dualbrep python=3.12 -y
 conda activate Dualbrep
-conda install -c conda-forge pythonocc-core=7.9.0 -y
+conda install -c conda-forge pythonocc-core=7.9.0 -y # DO NOT TRY OTHER OCC VERSION!
 pip install -r requirements.txt
 ```
 
