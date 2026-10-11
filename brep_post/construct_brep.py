@@ -180,7 +180,7 @@ def construct_brep_from_datanpz(npz_path, out_root, v_drop_num=0,
                                 is_ray=False, is_log=True,
                                 is_optimize_geom=True, v_max_optimize_iter=200,
                                 isdebug=False, use_cuda=False, from_scratch=True,
-                                is_save_data=False, suffix=-1):
+                                is_save_data=False, suffix=-1, v_fill_holes=True):
     diable_occ_log()
     # is_log = False
     # isdebug = False
@@ -384,6 +384,17 @@ def construct_brep_from_datanpz(npz_path, out_root, v_drop_num=0,
                     if solid is not None:
                         break
 
+            # Optional last resort: patch the holes left by faces that could not be trimmed
+            filled = False
+            if solid is None and v_fill_holes and len(trimmed_faces) > 0.8 * num_faces:
+                for connected_tolerance in CONNECT_TOLERANCE:
+                    patched = fill_holes(trimmed_faces, connected_tolerance)
+                    if patched:
+                        solid = get_solid(patched, connected_tolerance)
+                        if solid is not None:
+                            filled = True
+                            break
+
             # Check solid
             if solid is not None:
                 transformer.Perform(solid)
@@ -395,6 +406,8 @@ def construct_brep_from_datanpz(npz_path, out_root, v_drop_num=0,
                 else:
                     write_stl_file(solid, str(out_root / "recon_brep.stl"), linear_deflection=0.1, angular_deflection=0.2)
                     open(out_root / "success.txt", 'w').close()
+                    if filled:
+                        open(out_root / "filled.txt", 'w').close()   # postprocess prefers unfilled solids
                     is_success = True
                     break
         if is_success:

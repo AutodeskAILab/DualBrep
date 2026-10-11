@@ -5,6 +5,20 @@ Official implementation of **DualBrep: A Dual-Field Continuous Representation fo
 **SIGGRAPH 2026** — [arXiv:2606.31579](https://arxiv.org/abs/2606.31579). If you use this code,
 please [cite it](#citation).
 
+<p align="center">
+  <img src="assets/dualbrep_pipeline_wide.png" width="100%"
+       alt="DualBrep pipeline on test shape 00013293: input point cloud, segmentation, parametrized faces, B-rep">
+</p>
+
+<p align="center">
+  <video src="assets/dualbrep_brep_turntable_row.mp4" width="100%" autoplay loop muted playsinline controls></video>
+</p>
+
+*Top: the pipeline on test shape 00013293 — input point cloud → segmentation of the dual-field UDF →
+latent-optimised 16×16 face grids → watertight B-rep (STEP). Bottom: four complex free-form test shapes
+rebuilt from their point clouds
+([video](assets/dualbrep_brep_turntable_row.mp4)).*
+
 Boundary Representation (B-rep) is the dominant data format in Computer-Aided Design (CAD), prized
 for its analytical precision and native support for parametric editing. Its heterogeneous
 structure, however — continuous parametric geometry coupled with a discrete topological graph —
@@ -29,12 +43,21 @@ cloud / single RGB image) into a watertight, parametric **B-rep** (STEP file), c
 
 ## Release progress
 
-- [x] **Checkpoint release**
-- [x] **Sample code release**
+- [x] **Checkpoints**: autoencoders, point-cloud and image flow models, and the parametrizer
+- [x] **Inference code** with sample inputs
 - [x] **Evaluation code**
-- [x] **VAE pipeline**
-- [x] **Full testing results**
-- [ ] Training scripts & data pipeline
+- [x] **VAE pipeline**: encode a B-rep (STEP) into a latent and decode it back
+- [x] **Full test results**
+
+> **Update — 11 October 2026**
+>
+> - [x] 🆕 **Latent optimizer**: test-time optimisation of the parametrizer's per-face latents, so that
+>   adjacent faces meet before the B-rep is built ([details](#rebuild-details))
+> - [x] 🆕 **Upgraded rebuilder**: runs on pythonocc-core 8.0.1.1, builds each candidate without its own
+>   geometry optimisation first (so the optimised latents are kept), and closes the holes left by faces
+>   that cannot be trimmed ([details](#rebuild-details))
+> - [ ] **Training scripts and data pipeline**: will not be released, because the original models were
+>   trained on a distributed system.
 
 # Install
 
@@ -43,7 +66,7 @@ A single conda environment:
 ```bash
 conda create -n Dualbrep python=3.12 -y
 conda activate Dualbrep
-conda install -c conda-forge pythonocc-core=7.9.0 -y # DO NOT TRY OTHER OCC VERSION!
+conda install -c conda-forge pythonocc-core=8.0.1.1 -y
 pip install -r requirements.txt
 ```
 
@@ -60,6 +83,7 @@ unzip checkpoints.zip      # -> checkpoints/
 
 ```
 DualBrep/
+├── assets/        dualbrep_pipeline_wide.png  dualbrep_brep_turntable_row.mp4   # README figure and video
 ├── sample/        00013293.ply  00021127.ply  00026543.ply  00030157.ply   # bundled demo point clouds
 ├── sample_imgs/   00013293.png  00021127.png  00026543.png  00030157.png   # bundled demo conditioning images
 ├── checkpoints/   ae_vae.ckpt  pc_vae.ckpt  pc_flow.ckpt  img_flow.ckpt  parametrizer.ckpt
@@ -74,6 +98,7 @@ Input mesh / point cloud / image
         └─ SDF / UDF fields  →  surface mesh (recon_sdf.ply) + edge/wireframe (recon_udf.ply)
              └─ segmentation                (clustering.py)        →  segmented mesh (cluster.ply)
                   └─ Parametrizer            (rebuild.py)           →  per-face UV grids + edges + connectivity (tmp/<name>_<k>/post.npz)
+                       (+ latent optimisation: the decoded faces are made to meet)
                        └─ Rebuilder          (postprocess.py)       →  watertight B-rep (<name>.step + <name>.ply)
 ```
 
@@ -84,6 +109,9 @@ Input mesh / point cloud / image
 | Segmentation (B-rep faces) | `clustering.py` (via the above) | `cluster.ply` |
 | Parametrizer (UV grids + topology) | `rebuild.py` (+`rebuild_model.py`) | `tmp/<id>_<k>/post.npz` |
 | Rebuilder (assemble solid) | `postprocess.py` (+`brep_post/`) | `<name>.step` + `<name>.ply` |
+
+What the parametrizer and the rebuilder do in detail, their cost, and results on the test set:
+[Rebuild details](#rebuild-details).
 
 # Quick start on sample data
 
@@ -104,10 +132,13 @@ point cloud ──(AE encode→decode)──▶ SDF/UDF ──▶ surface mesh +
 ```bash
 ./run_pipeline.sh
 # overridable: CONFIG=config.yaml (implicit AE, from precomputed .npz)  OUT=out  ROTATIONS=all  TEST_RES=256
+#              NPROC=16   parametrizer processes sharing the GPU (through CUDA MPS when nvidia-cuda-mps-control exists)
+#              NUM_CPUS=  rebuilder CPUs (default: all cores)
 ```
 
 Results land in `output_pipeline/` — `recon/<name>/cluster.ply` and one valid B-rep per shape
 `brep/<name>.step` + `brep/<name>.ply` (the 24 rotation candidates are kept under `brep/tmp/`).
+All 4 sample shapes seal (75-76 of the 96 rotation candidates in our runs).
 
 # Reproduce main results
 
@@ -127,14 +158,57 @@ Then run the pipeline:
 # 1) point-cloud AE (DualVAE_PC / pc_vae.ckpt): direct reconstruct SDF/UDF + segment, at 256^3
 python ae_reconstruct.py config=config_pc.yaml \
     dataset.data_root=data/pc dataset.name_list=data/final_test.txt runtime.test_res=256
-#   -> per shape: recon_sdf.ply / recon_udf.ply / udf_g.npy / cluster.ply
+#   -> per shape under output_pc/: recon_sdf.ply / recon_udf.ply / udf_g.npy / cluster.ply
 
-# 2) parametrize each segmented mesh (24-rotation test-time augmentation)
-python rebuild.py --input <recon_output_dir> --out output_brep --rotations all
+# 2) parametrize each segmented mesh: 24-rotation test-time augmentation + latent optimisation (GPU)
+python rebuild.py --input output_pc --out output_brep
 
 # 3) assemble the B-rep
 python postprocess.py --input output_brep
 ```
+
+Step 2 takes 10-15 s per rotation candidate in one process, so for the 4150 shapes run several
+processes on one GPU through CUDA MPS, each with its own shard (this is what `run_pipeline.sh` does):
+
+```bash
+nvidia-cuda-mps-control -d
+for i in $(seq 0 15); do python rebuild.py --input output_pc --out output_brep --shard $i/16 & done; wait
+echo quit | nvidia-cuda-mps-control
+```
+
+# Rebuild details
+
+| Stage | What it does |
+|---|---|
+| Segmentation | `clustering.py` drops clusters below 100 triangles (`filter_size`): mostly slivers along edges, which rarely seal |
+| Parametrizer | `rebuild.py` drops predicted edges between faces whose clusters are clearly apart in `cluster.ply` (no vertex within 0.05) |
+| Parametrizer | `rebuild.py` then optimises the per-face latents of each rotation candidate so that adjacent faces meet: each decoded edge lies on both of its faces and passes through the input points along the boundary, the two half-edges of an adjacency coincide, and the edges of a face meet at its corners, while the faces stay on their input points (200 Adam steps; face sampling seeded per rotation) |
+| Rebuilder | `postprocess.py` builds each candidate first without the geometry optimisation that precedes surface fitting (which moves edges to fit face samples 0.05 apart and would undo the agreement reached above); only if that gives no solid, with it, and if still no tolerance seals the candidate, the holes left by faces that could not be trimmed are closed with n-sided patches (`BRepOffsetAPI_MakeFilling`) |
+| Rebuilder | each candidate is seeded (reproducible); per shape, rotations sealed without patches are preferred, and among the sealed rotations with the same vertices as the first one, the one with the smallest gap between faces is promoted |
+
+Cost: the latent optimisation takes 10-15 s per rotation candidate in one process. Several processes
+can share one GPU through CUDA MPS, each with `--shard k/n`: 24 processes on one NVIDIA L40S optimised
+the 2400 candidates of 100 shapes × 24 rotations in 52 minutes. The time grows with the number of
+faces: generated shapes with 55-120 faces took 2-4 times longer per candidate than these test shapes.
+The rebuilder takes 20-50 s per candidate on one CPU core.
+
+Results on the first 100 shapes of `data/final_test.txt` (point-cloud AE at 256³, 24 rotations; F1 from
+[`eval_seg.py`](#evaluation), a shape without a solid scores 0):
+
+| valid solids | F1 surface / edge / vertex | gap median |
+|---|---|---|
+| 85 | 0.708 / 0.662 / 0.615 | 5.8e-3 |
+
+- *Valid solid*: the rebuilder's own check — one solid that passes `BRepCheck` with every tolerance set
+  to 0.1 (shapes are in the unit box).
+- *Gap*: how far apart the faces of a solid really are — all tolerances are reset and raised only as
+  far as OpenCASCADE needs (`BRepLib` `SameParameter` + `UpdateTolerances`), and the gap is the largest
+  resulting tolerance.
+- Measured with pythonocc-core 8.0.1.1. The latent optimisation on the GPU is not bit-for-bit
+  repeatable, and the rebuilder's geometry optimisation gives slightly different results on different
+  machines, so reruns can differ by a few shapes. `eval_seg.py` meshes and samples each predicted face,
+  so its scores also vary a little between runs and OpenCASCADE versions (here by up to 0.002 in the
+  mean F1).
 
 # Evaluation
 
@@ -254,9 +328,8 @@ pipeline to become a watertight B-rep.
 
 Generation is **stochastic**: each run samples a fresh latent from noise, so (unlike the
 autoencoder) a single pass is not guaranteed to seal. Draw several samples per condition, run
-each through the parametrizer + rebuilder (`rebuild.py --rotations all`, 24-rotation
-test-time augmentation) and `postprocess.py`, then keep the samples that assemble into a valid
-solid:
+each through the parametrizer (`rebuild.py`: 24-rotation test-time augmentation + latent
+optimisation) and `postprocess.py`, then keep the samples that assemble into a valid solid:
 
 ```bash
 # draw N stochastic samples per condition (each run re-samples from noise), and
@@ -264,17 +337,17 @@ solid:
 for i in $(seq 0 7); do
   python vae_generate.py config=config_gen_pc.yaml \
       dataset.data_root=sample dataset.name_list=null runtime.output_dir=gen_out/s$i
-  python rebuild.py     --input gen_out/s$i --out gen_brep/s$i --rotations all
+  python rebuild.py     --input gen_out/s$i --out gen_brep/s$i
   python postprocess.py --input gen_brep/s$i
 done
 # gen_brep/s<i>/<name>.step is sample i's B-rep (if it sealed); pick a valid one per shape
 ```
 
 Not every sample seals. On the four bundled demo shapes, drawing 8 samples × 24 rotations each,
-**point-cloud** conditioning sealed a valid `BRepCheck` solid for **all four** shapes, while
-**single-image** conditioning sealed the simpler flange / grommet shapes but not the most detailed
-parts — image conditioning tends to over-segment complex geometry (many small B-rep faces), which
-seldom sews watertight. Point-cloud conditioning, which sees full 3D geometry, is more
+**point-cloud** conditioning sealed a valid `BRepCheck` solid for **all four** shapes (27 of the 32
+samples), while **single-image** conditioning sealed three of them (18 of 32 samples) but never the
+most detailed part, `00013293` — image conditioning tends to over-segment complex geometry (its
+samples of `00013293` had about 120 B-rep faces), which seldom sews watertight. Point-cloud conditioning, which sees full 3D geometry, is more
 reliable. Keep any sample whose B-rep passes `BRepCheck`; if a detailed shape never seals, draw
 more samples.
 
@@ -285,7 +358,8 @@ reconstructed surface using the per-face UDF (unsigned distance to the nearest B
 stored in `udf_g.npy`). The default `hierarchical` mode is a two-pass threshold +
 connected-components region grow (reproducing the C++ `segment_mode3` baseline): pass 1 keeps
 faces whose UDF is above a threshold and labels their connected components (low-UDF faces near
-edges are left unlabelled as boundaries), then drops clusters smaller than `filter_size`; pass 2
+edges are left unlabelled as boundaries), then drops clusters smaller than `filter_size` (100
+triangles); pass 2
 re-splits any cluster whose faces exceed a second, higher UDF threshold. The result is aligned
 with **B-rep faces** (one cluster per smooth face bounded by sharp edges), *not* semantic parts.
 It writes `cluster.ply` (per-face `label`), and can be re-run on existing folders:
@@ -305,11 +379,17 @@ re-poses the mesh by each of the 24 octahedral rotations `M[k]` (index 3 = ident
 `tmp/<id>_<k>/` — where `<id>` is the shape id (the recon folder name up to its first `_`, so
 recon dir `00013293_3` yields `tmp/00013293_00/ … tmp/00013293_23/`) and `<k>` is the rotation
 `postprocess.py` reads back to undo the pose. Test-time augmentation: many more candidates seal
-than a single pose.
+than a single pose (`--rotations`, default all 24). Predicted edges between faces whose clusters are
+clearly apart in `cluster.ply` are dropped, and the per-face latents of each candidate are then
+optimised so that adjacent faces meet (see [Rebuild details](#rebuild-details)); the loss terms of
+each candidate, before and after, go to `latent_opt.jsonl` in the output folder
+(`latent_opt_<i>.jsonl` for shard `i/n`).
 
 ```bash
-python rebuild.py --input <recon_dir>          --out output_brep --rotations all
-python rebuild.py --input <name>/cluster.ply   --out output_brep --rotations all
+python rebuild.py --input <recon_dir>          --out output_brep
+python rebuild.py --input <name>/cluster.ply   --out output_brep
+# knobs: --rotations all  --lopt_steps 200  --lopt_lr 2e-3  --lopt_w move=1 vert=1 ...  --num_fit_points 400
+#        --shard k/n (process every n-th shape, for several processes on one GPU)
 ```
 
 **Rebuilder — `postprocess.py`** (OpenCASCADE). Fits a trimmed B-spline surface per face,
@@ -318,15 +398,20 @@ candidate's rotation with `inv(M[k])`. Each face boundary is first closed with a
 wire builder; if that leaves an open loop (common on large faces bordered by many edges, where no
 single tolerance both bridges the widest junction gap and avoids over-merging nearby vertices), a
 fallback re-assembles the loops by ordered endpoint chaining and welds the gaps. Candidates are assembled in parallel with **Ray** (one
-CPU each); for every shape the first rotation that seals is promoted to `<name>.step` +
-`<name>.ply` (triangulation) in the output folder — the 24 candidates stay under `tmp/`.
+CPU each, seeded so a rebuild is reproducible). Each candidate is built without the geometry
+optimisation first, and only if that fails with it and hole filling (see
+[Rebuild details](#rebuild-details)). For every shape one sealed rotation is promoted to
+`<name>.step` + `<name>.ply` (triangulation) in the output folder — rotations sealed without patches
+first, and among the rotations with the same vertices as the first sealed one, the one with the
+smallest gap between faces. The 24 candidates stay under `tmp/`.
 
 ```bash
 python postprocess.py --input output_brep          # Ray parallel by default
-# knobs: --num_cpus 16  --serial  --max_optimize_iter 200  --drop_num 0  --no_optimize
+# knobs: --num_cpus 16  --serial  --max_optimize_iter 200  --drop_num 0  --timeout 1200  --seed 0 (-1: unseeded)
 ```
 
-Across rotations, roughly half seal into closed 1-solid STEPs (`BRepCheck` valid); one is kept per shape.
+Across rotations, about two thirds of the candidates seal into closed 1-solid STEPs (`BRepCheck`
+valid; first 100 test shapes); one is kept per shape.
 
 # Citation
 

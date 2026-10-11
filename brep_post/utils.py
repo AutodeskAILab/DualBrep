@@ -1321,6 +1321,55 @@ def get_solid(trimmed_faces, connected_tolerance):
         return None
 
 
+def fill_holes(trimmed_faces, connected_tolerance, max_hole_edges=60):
+    """Patch the holes left by faces that could not be trimmed.
+
+    Sew the trimmed faces and keep the largest shell (faces left out of it are dropped; capping them separately
+    would make extra closed bodies); its faces that are invalid on their own are removed too. Every closed loop of
+    free edges gets an n-sided patch through the loop edges (BRepOffsetAPI_MakeFilling, C0). Returns the shell's
+    faces + the patches, or [] if nothing was patched.
+    """
+    from OCC.Core.BRepOffsetAPI import BRepOffsetAPI_MakeFilling
+    sewing = BRepBuilderAPI_Sewing()
+    sewing.SetTolerance(connected_tolerance)
+    for face in trimmed_faces:
+        sewing.Add(face)
+    sewing.Perform()
+    shells = get_primitives(sewing.SewedShape(), TopAbs_SHELL)
+    if not shells:
+        return []
+    main = max(shells, key=lambda s: len(get_primitives(s, TopAbs_FACE)))
+    # Faces that are invalid on their own (crossing or open wires, bad pcurves) become holes as well.
+    good = [f for f in get_primitives(main, TopAbs_FACE) if BRepCheck_Analyzer(f).IsValid()]
+    if 0 < len(good) < len(get_primitives(main, TopAbs_FACE)):
+        sewing = BRepBuilderAPI_Sewing()
+        sewing.SetTolerance(connected_tolerance)
+        for face in good:
+            sewing.Add(face)
+        sewing.Perform()
+        shells = get_primitives(sewing.SewedShape(), TopAbs_SHELL)
+        if not shells:
+            return []
+        main = max(shells, key=lambda s: len(get_primitives(s, TopAbs_FACE)))
+    loops = get_primitives(ShapeAnalysis_FreeBounds(main, connected_tolerance, False, False).GetClosedWires(),
+                           TopAbs_WIRE)
+    patches = []
+    for loop in loops:
+        edges = get_primitives(loop, TopAbs_EDGE)
+        if not edges or len(edges) > max_hole_edges:
+            continue
+        filler = BRepOffsetAPI_MakeFilling(3, 15, 2, False, 1e-5, connected_tolerance, 0.1, 0.1, 8, 9)
+        for e in edges:
+            filler.Add(topods.Edge(e), GeomAbs_C0, True)
+        try:
+            filler.Build()
+            if filler.IsDone() and not filler.Shape().IsNull():
+                patches.extend(get_primitives(filler.Shape(), TopAbs_FACE))
+        except Exception as e:  # noqa: BLE001
+            print(f"filling failed: {e}")
+    return get_primitives(main, TopAbs_FACE) + patches if patches else []
+
+
 def get_compound(trimmed_faces, connected_tolerance):
     try:
         # Sew shells

@@ -13,9 +13,17 @@ force-kills (SIGKILL) any candidate that has been *running* longer than ``--time
 (default 1200s) -- queue / resource-wait time is never counted. Ray tasks are not retried
 (``max_retries=0``), and up to ``--max_running`` (default 10000) candidates are kept in flight
 (Ray still runs at most ``--num_cpus`` at a time, so this is a submission cap, not
-oversubscription). For each shape, the first rotation that seals into a valid watertight
-solid is promoted to ``<name>.step`` (+ ``<name>.ply`` triangulation); working files stay
-under ``tmp/``.
+oversubscription).
+
+Each candidate is built twice at most, from the same seed (``--seed``, so a rebuild is reproducible):
+first without the geometry optimization that precedes surface fitting and without hole filling
+(the latent-optimised faces of ``rebuild.py`` already meet; the optimization, which fits edges to
+face samples 0.05 apart, would undo that); if that gives no solid, with the optimization and, if
+no tolerance seals it, with the holes left by faces that could not be trimmed closed by n-sided
+patches (``BRepOffsetAPI_MakeFilling``). For each shape, one sealed rotation is promoted to
+``<name>.step`` (+ ``<name>.ply`` triangulation): rotations sealed without patches first; among
+the sealed rotations that are the same B-rep as the first one (same vertices), the one with the
+smallest real gap between faces. Working files stay under ``tmp/``.
 
 Usage:
     python postprocess.py --input output_brep
@@ -66,7 +74,8 @@ class StartRegistry:
         return [(k, ts) for k, ts in self._starts.items() if ts < cutoff]
 
 
-def build_one(npz_path, here, drop_num, use_cuda, is_optimize_geom, max_optimize_iter, registry=None):
+def build_one(npz_path, here, drop_num, use_cuda, is_optimize_geom, max_optimize_iter, registry=None,
+              seed=0, record_gap=True, fill_holes=True, no_optimize_first=True):
     """Assemble a single candidate -> (folder_name, is_valid_solid, error_or_None, run_seconds).
 
     Runs the OpenCASCADE assembly in-process. ``run_seconds`` is measured from when this task
@@ -74,6 +83,9 @@ def build_one(npz_path, here, drop_num, use_cuda, is_optimize_geom, max_optimize
     driver can force-kill a candidate that has been *running* past the timeout (queue /
     resource-wait time is never counted). Leaves ``pp/recon_brep.step`` + ``pp/recon_brep.stl``
     on success. Self-contained (imports inside) so it runs both in-process and as a Ray task.
+    ``no_optimize_first``: build without the geometry optimization and without hole filling first
+    (marks ``pp/no_optimize.txt``); only if that gives no solid, build again with
+    ``is_optimize_geom`` / ``fill_holes``. Each attempt starts from the same seed.
     """
     import time
     from pathlib import Path
@@ -91,18 +103,100 @@ def build_one(npz_path, here, drop_num, use_cuda, is_optimize_geom, max_optimize
     diable_occ_log()
     npz_path = Path(npz_path)
     pp = npz_path.parent / "pp"
+    # (is_optimize_geom, fill_holes) per attempt; from_scratch=True clears pp/ before each one
+    attempts = ([(False, False)] if no_optimize_first else []) + [(is_optimize_geom, fill_holes)]
     err = None
-    try:
-        construct_brep_from_datanpz(
-            npz_path, pp,
-            v_drop_num=drop_num, use_cuda=use_cuda, from_scratch=True,
-            is_save_data=False, is_log=False,
-            is_optimize_geom=is_optimize_geom, v_max_optimize_iter=max_optimize_iter,
-            is_ray=False, suffix=_suffix_from_folder(name),
-        )
-    except Exception as e:
-        err = str(e)[:160]
+    for i, (opt, fill) in enumerate(attempts):
+        if seed >= 0:    # wire building and sewing shuffle their inputs (random.shuffle)
+            import random
+            random.seed(seed)
+        err = None
+        try:
+            construct_brep_from_datanpz(
+                npz_path, pp,
+                v_drop_num=drop_num, use_cuda=use_cuda, from_scratch=True,
+                is_save_data=False, is_log=False,
+                is_optimize_geom=opt, v_max_optimize_iter=max_optimize_iter,
+                is_ray=False, suffix=_suffix_from_folder(name), v_fill_holes=fill,
+            )
+        except Exception as e:
+            err = str(e)[:160]
+        if (pp / "success.txt").exists():
+            if no_optimize_first and i == 0:
+                open(pp / "no_optimize.txt", "w").close()
+            break
+    if record_gap and (pp / "success.txt").exists():
+        try:
+            _save_gap_and_vertices(pp)
+        except Exception as e:
+            err = str(e)[:160]
     return name, (pp / "success.txt").exists(), err, time.time() - t_start
+
+
+def _save_gap_and_vertices(pp):
+    """Record a sealed candidate's real gap and its vertex positions in pp/gap.npz.
+
+    The solid is saved with every tolerance forced to the sewing tolerance that worked (up to 0.08),
+    which hides how far apart the faces really are. The real gap is the largest tolerance OCC needs
+    once all tolerances are reset and recomputed (SameParameter + UpdateTolerances).
+    """
+    import numpy as np
+    from OCC.Core.BRep import BRep_Tool
+    from OCC.Core.BRepLib import breplib
+    from OCC.Core.ShapeAnalysis import ShapeAnalysis_ShapeTolerance
+    from OCC.Core.ShapeFix import ShapeFix_ShapeTolerance
+    from OCC.Core.TopAbs import TopAbs_VERTEX
+    from OCC.Core.TopExp import TopExp_Explorer
+    from OCC.Core.TopoDS import topods
+    from OCC.Extend.DataExchange import read_step_file
+
+    from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
+    from OCC.Core.TopAbs import TopAbs_FACE
+    from OCC.Core.TopLoc import TopLoc_Location
+
+    shape = read_step_file(str(pp / "recon_brep.step"), verbosity=False)
+    exp, pts = TopExp_Explorer(shape, TopAbs_VERTEX), []
+    while exp.More():
+        p = BRep_Tool.Pnt(topods.Vertex(exp.Current()))
+        pts.append((p.X(), p.Y(), p.Z()))
+        exp.Next()
+    exp, bad_faces = TopExp_Explorer(shape, TopAbs_FACE), 0     # faces the mesher cannot triangulate
+    while exp.More():
+        face = topods.Face(exp.Current())
+        BRepMesh_IncrementalMesh(face, 0.1, True, 0.1)
+        bad_faces += BRep_Tool.Triangulation(face, TopLoc_Location()) is None
+        exp.Next()
+    ShapeFix_ShapeTolerance().LimitTolerance(shape, 1e-7, 1e-7)
+    breplib.SameParameter(shape, 1e-7, True)
+    breplib.UpdateTolerances(shape, False)
+    np.savez(pp / "gap.npz", gap=ShapeAnalysis_ShapeTolerance().Tolerance(shape, 1),
+             vertices=np.unique(np.round(np.array(pts), 6), axis=0), bad_faces=bad_faces)
+
+
+def _pick_rotation(sealed, cand_dir, vert_tol=2e-2):
+    """Among the sealed rotations, the smallest-gap one that is the same B-rep as the first sealed one
+    (same vertices within vert_tol, both ways) and has no more faces the mesher cannot triangulate.
+    Other rotations place the seams of periodic faces elsewhere, which costs vertex/edge F1 although
+    the solid is equally valid."""
+    import numpy as np
+
+    def load(n):
+        f = cand_dir[n] / "pp" / "gap.npz"
+        return np.load(f) if f.exists() else None
+
+    ref = load(sealed[0])
+    if ref is None:
+        return sealed[0]
+    best, best_gap = sealed[0], float(ref["gap"])
+    for n in sealed[1:]:
+        d = load(n)
+        if (d is None or len(d["vertices"]) != len(ref["vertices"]) or float(d["gap"]) >= best_gap
+                or int(d["bad_faces"]) > int(ref["bad_faces"])):
+            continue
+        dist = np.linalg.norm(d["vertices"][:, None] - ref["vertices"][None], axis=2)
+        if dist.min(1).max() < vert_tol and dist.min(0).max() < vert_tol:
+            best, best_gap = n, float(d["gap"])
+    return best
 
 
 def _promote(cand_dir, out_step, out_ply):
@@ -119,19 +213,18 @@ def main():
     ap.add_argument("--input", required=True, help="rebuild.py output dir (candidates under <input>/tmp/<name>_<k>/).")
     ap.add_argument("--drop_num", type=int, default=0, help="Faces to drop when searching for a valid sub-solid.")
     ap.add_argument("--max_optimize_iter", type=int, default=200, help="Geometry-optimization iterations.")
-    ap.add_argument("--no_optimize", action="store_true", help="Skip the boundary geometry optimization.")
     ap.add_argument("--use_cuda", action="store_true", help="Run geometry optimization on GPU.")
     ap.add_argument("--max_running", type=int, default=10000, help="Max candidates kept in flight at once (submission cap).")
     ap.add_argument("--num_cpus", type=int, default=None, help="Ray logical CPUs = candidates physically running at once (default: all cores).")
     ap.add_argument("--timeout", type=int, default=1200, help="Per-candidate timeout in seconds of ACTUAL running time (queue wait excluded).")
     ap.add_argument("--serial", action="store_true", help="Disable Ray; build candidates one at a time (no timeout).")
+    ap.add_argument("--seed", type=int, default=0, help="Per-candidate random seed (-1: unseeded).")
     args = ap.parse_args()
 
     root = Path(args.input)
     files = sorted((root / "tmp").glob("**/post.npz")) or sorted(root.glob("**/post.npz"))
     if not files:
         raise FileNotFoundError(f"No post.npz found under {root}/tmp")
-    is_opt = not args.no_optimize
     cand_dir = {f.parent.stem: f.parent for f in files}      # <name>_<k> -> candidate dir
     print(f"Found {len(files)} candidate(s) under {root}/tmp")
 
@@ -143,7 +236,8 @@ def main():
     if args.serial:
         bar = tqdm(files)
         for f in bar:
-            name, ok, err, rt = build_one(f, _HERE, args.drop_num, args.use_cuda, is_opt, args.max_optimize_iter)
+            name, ok, err, rt = build_one(f, _HERE, args.drop_num, args.use_cuda, True, args.max_optimize_iter,
+                                          seed=args.seed)
             valid[name] = ok
             runtimes[name] = rt
             if err:
@@ -171,7 +265,7 @@ def main():
 
         def submit(f):
             ref = remote_build.remote(str(f), _HERE, args.drop_num, args.use_cuda,
-                                      is_opt, args.max_optimize_iter, registry)
+                                      True, args.max_optimize_iter, registry, seed=args.seed)
             running[ref] = f
 
         for _ in range(min(MAX_RUNNING, len(pending))):
@@ -238,7 +332,7 @@ def main():
         bar.close()
         ray.shutdown()
 
-    # Group candidates by shape; promote the first rotation that sealed into a valid solid.
+    # Group candidates by shape; promote one sealed rotation per shape (--promote).
     by_shape = defaultdict(list)
     for name in cand_dir:
         by_shape[name.rsplit("_", 1)[0]].append(name)
@@ -247,10 +341,16 @@ def main():
     print()
     for stem in sorted(by_shape):
         sealed = sorted(n for n in by_shape[stem] if valid.get(n))
+        unfilled = [n for n in sealed if not (cand_dir[n] / "pp" / "filled.txt").exists()]
         if sealed:
-            _promote(cand_dir[sealed[0]], root / f"{stem}.step", root / f"{stem}.ply")
+            pool = unfilled or sealed                     # patched solids only if nothing sealed without patches
+            pick = _pick_rotation(pool, cand_dir)
+            _promote(cand_dir[pick], root / f"{stem}.step", root / f"{stem}.ply")
             n_ok += 1
-            print(f"  {stem}: solid from {sealed[0]} ({len(sealed)}/{len(by_shape[stem])} rotations sealed) -> {stem}.step + {stem}.ply")
+            note = (" (holes patched)" if not unfilled else
+                    " (no geometry optimization)" if (cand_dir[pick] / "pp" / "no_optimize.txt").exists() else "")
+            print(f"  {stem}: solid from {pick}{note} "
+                  f"({len(sealed)}/{len(by_shape[stem])} rotations sealed) -> {stem}.step + {stem}.ply")
         else:
             print(f"  {stem}: no watertight solid in {len(by_shape[stem])} rotations")
 

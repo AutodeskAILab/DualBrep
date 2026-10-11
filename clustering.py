@@ -43,7 +43,7 @@ def download_file(remote_path, tmp_dir):
 threshold = 0.01 # For coarse segmentation
 threshold1 = 0.005 # Pass-1 seed/mask threshold (C++ segment_mode3 --threshold)
 threshold2 = 0.01  # Pass-2 split threshold (C++ segment_mode3 hard-coded second_threshold)
-filter_size = 10   # Min cluster size (C++ segment_mode3 --filter_size)
+filter_size = 100  # Min cluster size in triangles: smaller clusters (mostly slivers along B-rep edges) are dropped
 mode = "hierarchical"  # "coarse", "hierarchical", "udf_mesh", "advanced"
 is_merge_small = False # C++ segment_mode3 (fine_seg off) has no plane-merge / back-fill / final cut
 final_size_threshold = 15
