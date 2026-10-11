@@ -11,13 +11,14 @@ please [cite it](#citation).
 </p>
 
 <p align="center">
-  <video src="assets/dualbrep_brep_turntable_row.mp4" width="100%" autoplay loop muted playsinline controls></video>
+  <img src="assets/dualbrep_brep_turntable_row.gif" width="100%"
+       alt="Four rebuilt B-reps of complex free-form test shapes, turning">
 </p>
 
 *Top: the pipeline on test shape 00013293 — input point cloud → segmentation of the dual-field UDF →
 latent-optimised 16×16 face grids → watertight B-rep (STEP). Bottom: four complex free-form test shapes
 rebuilt from their point clouds
-([video](assets/dualbrep_brep_turntable_row.mp4)).*
+([full-quality MP4](assets/dualbrep_brep_turntable_row.mp4)).*
 
 Boundary Representation (B-rep) is the dominant data format in Computer-Aided Design (CAD), prized
 for its analytical precision and native support for parametric editing. Its heterogeneous
@@ -83,7 +84,7 @@ unzip checkpoints.zip      # -> checkpoints/
 
 ```
 DualBrep/
-├── assets/        dualbrep_pipeline_wide.png  dualbrep_brep_turntable_row.mp4   # README figure and video
+├── assets/        dualbrep_pipeline_wide.png  dualbrep_brep_turntable_row.gif/.mp4   # README figure and video
 ├── sample/        00013293.ply  00021127.ply  00026543.ply  00030157.ply   # bundled demo point clouds
 ├── sample_imgs/   00013293.png  00021127.png  00026543.png  00030157.png   # bundled demo conditioning images
 ├── checkpoints/   ae_vae.ckpt  pc_vae.ckpt  pc_flow.ckpt  img_flow.ckpt  parametrizer.ckpt
